@@ -1,2 +1,2 @@
-# tiny-llm
+# open-llm
 Building an llm from scratch
