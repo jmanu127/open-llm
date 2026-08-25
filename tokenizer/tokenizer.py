@@ -1,15 +1,13 @@
 import ast
 import json
-import regex as re
-import numpy as np
-from typing import Iterable, Iterator
 import time
+from typing import Iterable, Iterator
+
+import numpy as np
+import regex as re
 
 # compile once
-PAT = re.compile(
-    r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",
-    re.UNICODE
-)
+PAT = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""", re.UNICODE)
 
 
 class Tokenizer:
@@ -106,8 +104,7 @@ class Tokenizer:
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         for text in iterable:
-            for token in self.encode(text):
-                yield token
+            yield from self.encode(text)
 
     def decode(self, ids):
         return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
@@ -131,24 +128,12 @@ def encode_dataset(tokenizer, input_path, output_path, dtype=np.uint16):
 
 
 if __name__ == "__main__":
-    tokenizer = Tokenizer.from_files(
-        "data/vocab.json",
-        "data/merges.txt",
-        special_tokens=["<|endoftext|>"]
-    )
+    tokenizer = Tokenizer.from_files("data/vocab.json", "data/merges.txt", special_tokens=["<|endoftext|>"])
 
     start = time.time()
 
-    encode_dataset(
-        tokenizer,
-        "data/TinyStoriesV2-GPT4-train.txt",
-        "data/train_tokens.npy"
-    )
+    encode_dataset(tokenizer, "data/TinyStoriesV2-GPT4-train.txt", "data/train_tokens.npy")
 
-    encode_dataset(
-        tokenizer,
-        "data/TinyStoriesV2-GPT4-valid.txt",
-        "data/val_tokens.npy"
-    )
+    encode_dataset(tokenizer, "data/TinyStoriesV2-GPT4-valid.txt", "data/val_tokens.npy")
 
     print("Total time:", time.time() - start)
