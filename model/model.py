@@ -5,79 +5,57 @@ import math
 from typing import Optional
 from einops import rearrange, einsum
 from typing import Union
-from cs336_basics import utils
+import utils
 
-# device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-# print(f"Using {device} device")
-
-# model = NeuralNetwork().to(device)
-# print(model)
 
 class Linear(nn.Module):
-    def __init__(self, in_features, out_features, device=None, dtype=None):
-        '''
-        Construct a linear transformation module. This function should accept the 
-        following parameters:
-
+    '''Construct a linear transformation module w/o bias:
+    Args:
         in_features: int final dimension of the input
         out_features: int final dimension of the output
         device: torch.device | None = None Device to store the parameters on
         dtype: torch.dtype | None = None Data type of the parameters
-        '''
+    '''
+    def __init__(self, in_features, out_features, device=None, dtype=None):
         super().__init__()
         # Create weight parameter W (shape: out_features × in_features)
-        self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, device=device, dtype=dtype)
-        )
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, device=device, dtype=dtype))
         # Initialize weights using truncated normal
         std = math.sqrt(2/(in_features+out_features))
         nn.init.trunc_normal_(self.weight, mean=0, std=std, a=-3*std, b=3*std)
-        # nn.init.trunc_normal_(self.weight)
         
-
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        '''Apply the linear transformation to the
-        input.
-        '''
-        # x: (..., in_features)
-        # W: (out_features, in_features)
-        # Output: (..., out_features)
-        # output = x @ self.weight.T
-        # output = einsum(x, self.weight, "... d_in, d_in d_out -> ... d_out")
-        # output = einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
+        # return = x @ self.weight.T #without einops
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
     
 
 class Embedding(nn.Module):
-    """
-    embedding layer that maps integer token IDs into a vector space of dimension
+    """Embedding layer that maps token IDs to dense vectors:
+    Args:
+        num_embeddings: Size of the vocabulary.
+        embedding_dim: Dimension of each embedding vector.
+        device: Device on which to store the embedding matrix.
+        dtype: Data type of the embedding matrix.
+
+    Shape:
+        Input: (...,)
+        Weight: (num_embeddings, embedding_dim)
+        Output: (..., embedding_dim)
     """
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
-        """
-        num_embeddings: int, Size of the vocabulary
-        embedding_dim: int, Dimension of the embedding vectors i.e. d_model
-        device: torch.device | None = None, Device to store the parameters on 
-        dtype: torch.dtype | None = None, Data type of the parameters
-        """
         super().__init__()
-
         # Create embedding weight matrix and register as parameter
-        self.weight = nn.Parameter(
-            torch.empty((num_embeddings, embedding_dim), device=device, dtype=dtype)
-        )
-
+        self.weight = nn.Parameter(torch.empty((num_embeddings, embedding_dim), device=device, dtype=dtype))
         # Initialize with truncated normal
         nn.init.trunc_normal_(self.weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
-   
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         """
         token_ids: (...,) LongTensor of token indices
         returns: (..., embedding_dim)
         """
-        # return self.weight[token_ids]
-        return self.weight.index_select(0, token_ids.reshape(-1)).view(*token_ids.shape, -1)
+        return self.weight[token_ids]
+
     
 
 class RMSNorm(nn.Module):
