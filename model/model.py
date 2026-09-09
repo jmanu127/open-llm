@@ -30,7 +30,7 @@ class Linear(nn.Module):
     
 
 class Embedding(nn.Module):
-    """Embedding layer that maps token IDs to dense vectors:
+    '''Embedding layer that maps token IDs to dense vectors:
     Args:
         num_embeddings: Size of the vocabulary.
         embedding_dim: Dimension of each embedding vector.
@@ -41,7 +41,7 @@ class Embedding(nn.Module):
         Input: (...,)
         Weight: (num_embeddings, embedding_dim)
         Output: (..., embedding_dim)
-    """
+    '''
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
         super().__init__()
         # Create embedding weight matrix and register as parameter
@@ -50,10 +50,7 @@ class Embedding(nn.Module):
         nn.init.trunc_normal_(self.weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """
-        token_ids: (...,) LongTensor of token indices
-        returns: (..., embedding_dim)
-        """
+        '''Lookup embedding vectors from tokens'''
         return self.weight[token_ids]
 
     
@@ -76,28 +73,17 @@ class RMSNorm(nn.Module):
 
     Args:
         d_model (int): Dimensionality of the input feature vector.
-        eps (float, optional): Small constant for numerical stability.
+        eps (float): Small constant for numerical stability.
                               Defaults to 1e-5.
-        device (optional): Device on which parameters are allocated.
         dtype (optional): Data type of the learnable parameters.
     """
 
-    def __init__(
-        self,
-        d_model: int,
-        eps: float = 1e-5,
-        device=None,
-        dtype=None,
-    ):
+    def __init__(self, d_model: int, eps: float = 1e-5, dtype=None):
         super().__init__()
-
         self.d_model = d_model
         self.eps = eps
-
         # Learnable scale parameter (gamma), shape: (d_model,)
-        self.weight = nn.Parameter(
-            torch.ones(d_model, device=device, dtype=dtype)
-        )
+        self.weight = nn.Parameter(torch.ones(d_model, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -116,25 +102,12 @@ class RMSNorm(nn.Module):
               stability, then cast back to the original dtype.
         """
         orig_dtype = x.dtype
-
-        # Upcast to float32 for numerical stability
         x_float = x.to(torch.float32)
-
-        # Compute RMS over the last dimension
-        # Shape: (B, T, 1)
-        # rms = sqrt(mean(x^2) + eps)
-        rms = torch.sqrt(
-            torch.mean(x_float ** 2, dim=-1, keepdim=True) + self.eps
-        )
-
+        # Mean square
+        mean_square = (x_float * x_float).mean(dim=-1, keepdim=True)
         # Normalize
-        x_norm = x_float / rms
-
-        # Apply learnable scale (broadcast over batch & seq)
-        out = x_norm * self.weight
-
-        # Cast back to original dtype (e.g., float16 / bfloat16)
-        return out.to(orig_dtype)
+        x_norm = x_float * torch.rsqrt(mean_square + self.eps)
+        return (x_norm * self.weight).to(orig_dtype)
     
 
 class Positionwise_FeedForward(nn.Module):
