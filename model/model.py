@@ -8,6 +8,7 @@ from typing import Union
 import utils
 
 
+
 class Linear(nn.Module):
     '''Construct a linear transformation module w/o bias:
     Args:
@@ -27,13 +28,13 @@ class Linear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # return = x @ self.weight.T #without einops
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
-    
+
 
 class Embedding(nn.Module):
     '''Embedding layer that maps token IDs to dense vectors:
     Args:
-        num_embeddings: Size of the vocabulary.
-        embedding_dim: Dimension of each embedding vector.
+        num_embeddings: Size of the vocabulary. (vocab/num of tokens)
+        embedding_dim: Dimension of each embedding vector. (d_model)
         device: Device on which to store the embedding matrix.
         dtype: Data type of the embedding matrix.
 
@@ -53,11 +54,10 @@ class Embedding(nn.Module):
         '''Lookup embedding vectors from tokens'''
         return self.weight[token_ids]
 
-    
 
 class RMSNorm(nn.Module):
     """
-    Root Mean Square Layer Normalization (RMSNorm).
+    Root Mean Square Layer Normalization (RMSNorm). ## make this a kernal fusion for effeciency?
 
     RMSNorm normalizes inputs by their root mean square (second moment)
     rather than by mean and variance as in LayerNorm.
@@ -108,7 +108,7 @@ class RMSNorm(nn.Module):
         # Normalize
         x_norm = x_float * torch.rsqrt(mean_square + self.eps)
         return (x_norm * self.weight).to(orig_dtype)
-    
+
 
 class Positionwise_FeedForward(nn.Module):
     """
@@ -135,61 +135,57 @@ class Positionwise_FeedForward(nn.Module):
         d_ff (int, optional): Hidden dimensionality of the FFN.
             If None, uses the common 8/3 * d_model rule and rounds
             to a multiple of 64 for hardware efficiency.
-        device (optional): Device on which parameters are allocated.
         dtype (optional): Data type of the parameters.
     """
 
-    def __init__(self, d_model: int, d_ff: int = None, device=None, dtype=None):
+    def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
         super().__init__()
 
         if d_ff is None:
             # Common SwiGLU sizing rule used in LLaMA-style models
-            d_ff = int((d_model * 8 / 3) // 64) * 64
+            d_ff = int(8 * d_model / 3)
+        d_ff = 64 * ((d_ff + 63) // 64)
 
-        # # Compute d_ff ≈ 8/3 * d_model
-        # d_ff = int((8 * d_model) / 3)
-
-        # # Round up to nearest multiple of 64
-        # d_ff = 64 * (d_ff // 64)
+        self.d_model = d_model
 
         # Sigmoid Linear Unit
-        self.SiLU = SiLU()
+        self.silu = SiLU()
+
+        std = math.sqrt(2/(d_model+d_ff))
+        # std = 1 / math.sqrt(3 * d_model)
 
         # Projection for the gated (SiLU) branch
-        self.w1 = nn.Linear(d_model, d_ff, bias=False, device=device, dtype=dtype)
-
+        self.w1 = Linear(d_model, d_ff, device=device, dtype=dtype)
+        
         # Projection for the linear (gate) branch
-        self.w3 = nn.Linear(d_model, d_ff, bias=False, device=device, dtype=dtype)
-
+        self.w3 = Linear(d_model, d_ff, device=device, dtype=dtype)
+        
         # Output projection back to model dimension
-        self.w2 = nn.Linear(d_ff, d_model, bias=False, device=device, dtype=dtype)
+        self.w2 = Linear(d_ff, d_model, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the SwiGLU feed-forward network.
-
         Args:
             x (torch.Tensor): Input tensor of shape
                 (batch_size, sequence_length, d_model)
-
         Returns:
             torch.Tensor: Output tensor of shape
                 (batch_size, sequence_length, d_model)
-
         Notes:
             - The same FFN is applied independently to each position.
             - No interaction occurs between tokens in this module.
         """
-        # Gated branch with SiLU activation
-        gated = self.SiLU(self.w1(x))
+        if x.shape[-1] != self.d_model:
+            raise ValueError(f"Expected {self.d_model}, got {x.shape[-1]}")
 
+        # SiLU activation
+        silu_branch = self.silu(self.w1(x))
         # Linear gate branch
         gate = self.w3(x)
-
         # Element-wise gating and projection back to d_model
-        return self.w2(gate * gated)
-   
-    
+        return self.w2(silu_branch * gate)
+
 
 class SiLU(nn.Module):
     """
@@ -211,22 +207,11 @@ class SiLU(nn.Module):
         PyTorch already provides this as nn.SiLU, but this class
         demonstrates a manual implementation for clarity.
     """
-
-    def __init__(self): 
+    def __init__(self):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply the SiLU activation function.
-
-        Args:
-            x (torch.Tensor): Input tensor of any shape.
-
-        Returns:
-            torch.Tensor: Output tensor with the same shape as input.
-        """
         return x * torch.sigmoid(x)
-    
 
 
 class RotaryPositionalEmbedding(nn.Module):
@@ -254,7 +239,6 @@ class RotaryPositionalEmbedding(nn.Module):
     - Cosine and sine values are precomputed up to `max_seq_len` and stored
       as non-persistent buffers.
     - Works with arbitrary batch dimensions.
-    https://www.youtube.com/watch?v=hCzJo4ui1P8
 
     Args
     ----
@@ -264,19 +248,17 @@ class RotaryPositionalEmbedding(nn.Module):
         Dimension of the query/key vectors (must be even).
     max_seq_len : int
         Maximum supported sequence length.
-    device : torch.device | None
-        Device on which buffers will be allocated.
     """
 
-    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int):
         super().__init__()
 
         if d_k % 2 != 0:
             raise ValueError("d_k must be even for RotaryPositionalEmbedding.")
 
         self.d_k = d_k
-        self.max_seq_len = max_seq_len
-        self.theta = theta
+        # self.max_seq_len = max_seq_len
+        # self.theta = theta
 
         # Create frequency scaling factors for each dimension pair.
         # Shape: (d_k // 2,)
@@ -284,17 +266,17 @@ class RotaryPositionalEmbedding(nn.Module):
         # inv_freq[k] = 1 / (theta^(2k/d_k))
         #
         # This corresponds to the denominator term in theta_i,k.
-        k = torch.arange(0, d_k // 2, device=device)
+        k = torch.arange(0, d_k // 2, dtype=torch.float32)
         inv_freq = 1.0 / (theta ** (2 * k / d_k))
 
         # Token positions (0 ... max_seq_len-1)
-        positions = torch.arange(max_seq_len, device=device)
+        positions = torch.arange(max_seq_len, dtype=torch.float32)
 
         # Compute rotation angles:
         # angles[i, k] = i * inv_freq[k]
         # Shape: (max_seq_len, d_k // 2)
         # angles = torch.outer(positions, inv_freq)
-        angles = einsum(positions, inv_freq, 'i, j -> i j')
+        angles = einsum(positions, inv_freq, "i, j -> i j")
 
         # Precompute cosine and sine values
         cos = torch.cos(angles)
@@ -329,35 +311,26 @@ class RotaryPositionalEmbedding(nn.Module):
         """
 
         if x.shape[-1] != self.d_k:
-            raise ValueError(
-                f"Last dimension of x must be {self.d_k}, got {x.shape[-1]}"
-            )
+            raise ValueError(f"Last dimension of x must be {self.d_k}, got {x.shape[-1]}")
 
         # Retrieve cos/sin values for the given token positions.
         # Resulting shape: (..., seq_len, d_k // 2)
-        cos = self.cos[token_positions]
-        sin = self.sin[token_positions]
+        cos = self.cos[token_positions].to(dtype=x.dtype)
+        sin = self.sin[token_positions].to(dtype=x.dtype)
 
         # Split even and odd dimensions:
-        # x_even[..., k] = x[..., 2k]
-        # x_odd[..., k]  = x[..., 2k+1]
         x_even = x[..., 0::2]
         x_odd = x[..., 1::2]
 
         # Apply rotation:
-        # x_even' = x_even * cos - x_odd * sin
-        # x_odd'  = x_even * sin + x_odd * cos
         x_rot_even = x_even * cos - x_odd * sin
         x_rot_odd = x_even * sin + x_odd * cos
 
         # Interleave rotated pairs back into original dimension layout.
         # Stack last dim as (..., seq_len, d_k/2, 2) then flatten.
-        x_out = torch.stack((x_rot_even, x_rot_odd), dim=-1)
-        x_out = x_out.flatten(-2)
+        return torch.stack((x_rot_even, x_rot_odd), dim=-1).flatten(-2)
 
-        return x_out
 
-    
 class Multihead_self_attention(nn.Module):
     """
     Causal multi-head self-attention module with optional rotary positional embeddings (RoPE).
@@ -384,12 +357,11 @@ class Multihead_self_attention(nn.Module):
             Optional module that applies rotary positional embeddings. This module
             must accept inputs of shape (..., seq_len, d_head) and corresponding
             token positions.
-        device:
-            Optional device for parameter initialization.
         dtype:
             Optional data type for parameter initialization.
     """
-    def __init__(self, d_model: int, num_heads: int, positional_embedding_layer=None, device=None, dtype=None):
+
+    def __init__(self, d_model: int, num_heads: int, positional_embedding_layer=None, dtype=None):
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
@@ -399,188 +371,155 @@ class Multihead_self_attention(nn.Module):
         self.d_head = d_model // num_heads
 
         # Projections (3 total, as in Vaswani et al.)
-        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.q_proj = Linear(d_model, d_model, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, dtype=dtype)
 
         # Output projection
-        self.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.output_proj = Linear(d_model, d_model, dtype=dtype)
 
         # Optional RoPE module
         self.positional_embedding_layer = positional_embedding_layer
 
-    def forward(self, x: torch.Tensor, token_positions: Optional[torch.Tensor] = None, past_k: Optional[torch.Tensor] = None, past_v: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self,x: torch.Tensor):
         """
-        Compute causal multi-head self-attention over an input sequence.
-
         Args:
-            x (torch.Tensor):
-                Input tensor of shape (batch_size, seq_len, d_model).
-            token_positions (Optional[torch.Tensor]):
-                Tensor of shape (seq_len,) specifying the positional indices of
-                each token in the sequence. Required when a rotary positional
-                embedding layer is used. If omitted, positions are assumed to be
-                [0, 1, ..., seq_len - 1].
-
+            x:
+                (batch_size, seq_len, d_model)
+            token_positions:
+                (seq_len,) or (batch_size, seq_len)
         Returns:
-            torch.Tensor:
-                Output tensor of shape (batch_size, seq_len, d_model), where each
-                token representation is updated by attending to all previous
-                tokens in the sequence (including itself).
+            output:
+                (batch_size, seq_len, d_model)
         """
         batch_size, seq_len, _ = x.shape
-        
-        # Project to Q, K, V 
+
+        # Project to Q, K, V
         Q = self.q_proj(x)
         K = self.k_proj(x)
         V = self.v_proj(x)
-        
-        # 2. Split into heads 
-        # (batch, seq_len, d_model) → (batch, num_heads, seq_len, d_head)
+
+        # Split into heads
+        # (b, s, d_model) -> (b, h, s, d_head)
         Q = rearrange(Q, "b s (h d) -> b h s d", h=self.num_heads)
         K = rearrange(K, "b s (h d) -> b h s d", h=self.num_heads)
         V = rearrange(V, "b s (h d) -> b h s d", h=self.num_heads)
-        
-        # 3. Treat heads as batch dimension for computational effeciency fot matmul 
-        Q = rearrange(Q, "b h s d -> (b h) s d")
-        K = rearrange(K, "b h s d -> (b h) s d")
-        V = rearrange(V, "b h s d -> (b h) s d")
-        
-        # 4. Apply RoPE to Q and K (if provided) 
+
+        # Apply RoPE to NEW Q and K
         if self.positional_embedding_layer is not None:
-            if token_positions is None:
-                token_positions = torch.arange(seq_len, device=x.device)
+            # if token_positions is None:
+            token_positions = torch.arange(seq_len, device=x.device)
+
             Q = self.positional_embedding_layer(Q, token_positions)
             K = self.positional_embedding_layer(K, token_positions)
 
-        # Causal mask 
-        # causal_mask = torch.tril(
-        #     torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
-        # )
-        past_len = 0 if past_k is None else past_k.shape[1]
-        total_len = past_len + seq_len
+        # Flatten heads into batch dimension
+        # (b, h, s, d) -> (b*h, s, d)
+        # Q = rearrange(Q, "b h s d -> (b h) s d")
+        # K = rearrange(K, "b h s d -> (b h) s d")
+        # V = rearrange(V, "b h s d -> (b h) s d")
 
-        causal_mask = torch.tril(
-            torch.ones(seq_len, total_len, device=x.device),
-            diagonal=past_len
-        )
+        # Causal mask
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool))
 
-        # Concatenate past KV if provided
-        if past_k is not None and past_v is not None:
-            K = torch.cat([past_k, K], dim=1)
-            V = torch.cat([past_v, V], dim=1)
+        # Scaled dot-product attention
+        attn = scaled_dot_product_attention(Q, K, V, mask=causal_mask)
 
-        # Scaled dot-product attention 
-        attn = self.scaled_dot_product_attention(Q, K, V, mask=causal_mask)
+        # Restore heads
+        # (b*h, s, d) -> (b, s, h*d)
+        # attn = rearrange(attn, "(b h) s d -> b s (h d)", b=batch_size, h=self.num_heads)
+        attn = rearrange(attn, "b h s d -> b s (h d)", b=batch_size, h=self.num_heads)
 
-        # Restore head structure 
-        attn = rearrange(
-            attn, "(b h) s d -> b s (h d)", b=batch_size, h=self.num_heads
-        )
+        # Output projection
+        return self.output_proj(attn)
 
-        # Output projection 
-        # return self.output_proj(attn)
-    
-        return self.output_proj(attn), (K, V)
-            
+@staticmethod
+def scaled_dot_product_attention(queries, keys, values, mask=None) -> torch.Tensor:
+    """Computes Scaled Dot-Product Attention.
 
-    @staticmethod
-    def scaled_dot_product_attention(queries, keys, values, mask=None) -> torch.Tensor:
-        """Computes Scaled Dot-Product Attention.
+    Args:
+        queries: Tensor of shape (batch, ..., seq_len_q, d_k).
+        keys: Tensor of shape (batch, ..., seq_len_k, d_k).
+        values: Tensor of shape (batch, ..., seq_len_k, d_v).
+        mask: Boolean mask of shape (..., seq_len_q, seq_len_k).
+            True indicates tokens to attend to; False indicates tokens to ignore.
 
-        Args:
-            queries: Tensor of shape (batch, ..., seq_len_q, d_k).
-            keys: Tensor of shape (batch, ..., seq_len_k, d_k).
-            values: Tensor of shape (batch, ..., seq_len_k, d_v).
-            mask: Boolean mask of shape (..., seq_len_q, seq_len_k). 
-                True indicates tokens to attend to; False indicates tokens to ignore.
+    Returns:
+        torch.Tensor: Weighted sum of values, shape (batch, ..., seq_len_q, d_v).
+    """
+    d_k = queries.size(-1)
 
-        Returns:
-            torch.Tensor: Weighted sum of values, shape (batch, ..., seq_len_q, d_v).
-        """
-        d_k = queries.size(-1)
-        
-        # Compute dot products between Q and K, scale by sqrt(d_k)
-        # Equation: (batch, q, d) x (batch, k, d) -> (batch, q, k)
-        scores = einsum(queries, keys,"... q d, ... k d -> ... q k") / math.sqrt(d_k)
-        
-        # Apply mask before softmax
-        if mask is not None:
-            # Use a very large negative number so masked positions become 0 after softmax
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+    # Compute dot products between Q and K, scale by sqrt(d_k)
+    # Equation: (batch, q, d) x (batch, k, d) -> (batch, q, k)
+    scores = einsum(queries, keys, "... q d, ... k d -> ... q k") / math.sqrt(d_k)
 
-        # Normalize scores across the key sequence length
-        weights = utils.softmax(scores, dim=-1)
-        
-        # Apply weights to values
-        # Equation: (batch, q, k) x (batch, k, v) -> (batch, q, v)
-        return einsum(weights, values, "... q k, ... k v -> ... q v")
-    
+    # Apply mask before softmax
+    # if mask is not None:
+    #     # Use a very large negative number so masked positions become 0 after softmax
+    #     scores = scores.masked_fill(mask == 0, float("-inf"))
+    # Mask out positions that should not be attended to
+    if mask is not None:
+        scores = scores.masked_fill(~mask, float("-inf"))
+
+    # Normalize scores across the key sequence length
+    weights = utils.softmax(scores, dim=-1)
+
+    # Apply weights to values
+    # Equation: (batch, q, k) x (batch, k, v) -> (batch, q, v)
+    return einsum(weights, values, "... q k, ... k v -> ... q v")
 
 
 class TransformerBlock(nn.Module):
     """
-    A transfomer block that contains two 'sublayers', one for the multihead self attention, and another for the feed-forward network. 
+    A transfomer block that contains two 'sublayers', one for the multihead self attention, and another for the feed-forward network.
     In each sublayer, first perform RMSNorm, then the main operation (MHA/FF), finally adding in the residual connection
-    """
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, positional_embedding_layer: Optional[torch.Tensor] = None): 
-        """
-        d_model: int, Dimensionality of the Transformer block inputs.
-        num_heads: int, Number of heads to use in multi-head self-attention. 
-        d_ff: int, Dimensionality of the position-wise feed-forward inner layer.
-        """
-        super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.d_ff = d_ff
-
-        self.ln1 = RMSNorm(d_model=d_model)
-        self.ln2 = RMSNorm(d_model=d_model)
-        self.attn = Multihead_self_attention(d_model=d_model, num_heads=num_heads, positional_embedding_layer=positional_embedding_layer)
-        self.ffn = Positionwise_FeedForward(d_model=d_model, d_ff=d_ff)
     
-    def forward(self, x: torch.Tensor, past_k=None, past_v=None) -> torch.Tensor:
+    d_model: int, Dimensionality of the Transformer block inputs.
+    num_heads: int, Number of heads to use in multi-head self-attention.
+    d_ff: int, Dimensionality of the position-wise feed-forward inner layer.
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, positional_embedding_layer: torch.Tensor | None):
+        super().__init__()
+
+        self.ln1 = RMSNorm(d_model)
+        self.ln2 = RMSNorm(d_model)
+        self.attn = Multihead_self_attention(d_model, num_heads, positional_embedding_layer)
+        self.ffn = Positionwise_FeedForward(d_model, d_ff)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x dim (batch_size, seq_len, d_model)
         """
-
-        ## token_positions dim: (batch_size num_heads seq_len)
-        seq_len = x.shape[-2]
-        # token_positions = rearrange(torch.arange(seq_len), "seq_len -> 1 1 seq_len")
-        # token_positions = torch.arange(seq_len, device=x.device)
-        past_len = 0 if past_k is None else past_k.shape[1]
-        token_positions = torch.arange(
-            past_len, past_len + seq_len, device=x.device
-        )
-
         ## out_1 dim: (batch_size, seq_len, d_model)
-        attn_out, kv = self.attn(self.ln1(x), token_positions, past_k, past_v)
+        attn_out = self.attn(self.ln1(x))
         out_1 = x + attn_out
 
         ## out_2 dim: (batch_size, seq_len, d_model)
         out_2 = out_1 + self.ffn(self.ln2(out_1))
 
-        return out_2, kv
+        return out_2
 
 
 class TransformerLM(nn.Module):
     """
-    Full language model. 
+    Full language model.
     """
-    def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int, num_heads: int, d_ff: int, rope_theta: float = 10000.0):
+
+    def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int,
+                  num_heads: int, d_ff: int, rope_theta: float = 10000.0):
         """
         vocab_size: int, The size of the vocabulary, necessary for determining the dimensionality of the token embedding matrix.
         context_length: int, The maximum context length, necessary for determining the dimensionality of the position embedding matrix.
         num_layers: int, The number of Transformer blocks to use.
         d_model: int, Dimensionality of the Transformer block inputs.
-        num_heads: int, Number of heads to use in multi-head self-attention. 
+        num_heads: int, Number of heads to use in multi-head self-attention.
         d_ff: int, Dimensionality of the position-wise feed-forward inner layer.
         rope_theta: float, The RoPE Theta parameter.
         """
         super().__init__()
         self.vocab_size = vocab_size
         self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
-        rope = RotaryPositionalEmbedding(theta=rope_theta, d_k=d_model//num_heads, max_seq_len=context_length)
+        rope = RotaryPositionalEmbedding(theta=rope_theta, d_k=d_model // num_heads, max_seq_len=context_length)
 
         self.ln_final = RMSNorm(d_model=d_model)
         self.lm_head = Linear(in_features=d_model, out_features=vocab_size)
@@ -588,32 +527,27 @@ class TransformerLM(nn.Module):
         self.layers = nn.Sequential()
         for i in range(num_layers):
             self.layers.add_module(f"{i}", TransformerBlock(d_model, num_heads, d_ff, positional_embedding_layer=rope))
-        
-        print('vocab_size:', vocab_size, ' context_length:',context_length,' num_layers:',num_layers,' d_model:',d_model,' num_heads',num_heads,' d_ff',d_ff)
-        
-    def forward(self, x: torch.Tensor, past_kvs=None):
+
+        print(
+            "vocab_size:", vocab_size,
+            " context_length:", context_length,
+            " num_layers:", num_layers,
+            " d_model:", d_model,
+            " num_heads", num_heads,
+            " d_ff", d_ff
+        )
+
+    def forward(self, x: torch.Tensor):
         """
         x: Int[Tensor, "batch_size sequence_length"]
         output: Int[Tensor, "batch_size sequence_length vocab_size"], unnormalized prediction scores
         """
-        
+
         ## embedding -> transformer blocks
         # out = self.layers(self.token_embeddings(x))
         out = self.token_embeddings(x)
-        new_past_kvs = []
-        for i, layer in enumerate(self.layers):
-            if past_kvs is None:
-                past_k, past_v = None, None
-            else:
-                past = past_kvs[i]
-                if past is None:
-                    past_k, past_v = None, None
-                else:
-                    past_k, past_v = past
-            out, kv = layer(out, past_k=past_k, past_v=past_v)
-            new_past_kvs.append(kv)
-
+        for layer in self.layers:
+            out = layer(out)
+            
         ## norm, linear
-        out_score = self.lm_head(self.ln_final(out))
-
-        return out_score, new_past_kvs
+        return self.lm_head(self.ln_final(out))

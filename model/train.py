@@ -18,7 +18,7 @@ def evaluate(model, data, batch_size, context_length, device, num_batches=20):
     with torch.no_grad():
         for _ in range(num_batches):
             x, y = get_batch(data, batch_size, context_length, device)
-            logits, _ = model(x)
+            logits = model(x)
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 y.view(-1)
@@ -80,7 +80,7 @@ def main(args):
         )
 
         # ---- forward ----
-        logits, _ = model(x)
+        logits = model(x)
 
         loss = nn.functional.cross_entropy(
             logits.view(-1, logits.size(-1)),
