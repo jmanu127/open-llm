@@ -160,7 +160,7 @@ python model/gen_text.py
 - [x] KV-cache inference & nucleus (Top-$p$) sampling
 - [x] Attention & memory benchmarking suite (Flash Attention 2 comparison)
 
-### 🔮 Roadmap & Future Scope
+### Roadmap & Future Scope
 - [ ] Grouped-Query Attention (GQA) & Multi-Query Attention (MQA)
 - [ ] Custom CUDA kernels for fused operations
 - [ ] Distributed Training (DDP / FSDP / Megatron-LM style tensor parallelism)
