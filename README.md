@@ -73,8 +73,7 @@ open-llm/
 │   ├── optimizer.py        # Custom AdamW optimizer & Cosine LR schedule with warmup
 │   ├── gen_text.py         # Autoregressive text generation with Top-p sampling
 │   ├── serialization.py    # Save/load model and optimizer state checkpoints
-│   └── utils.py            # Math utilities and custom activation functions
-├── tokenizer/              # BPE Tokenizer implementation & data processing
+│   ├── utils.py            # Math utilities and custom activation functions
 │   ├── tokenizer.py        # BPE Tokenizer class (encode/decode, special tokens, cache)
 │   ├── train_bpe.py        # BPE vocabulary trainer
 │   └── data_loader.py      # Memory-mapped dataset loader (get_batch)
