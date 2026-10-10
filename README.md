@@ -15,7 +15,7 @@ A lightweight, modular, and optimized implementation of a modern **GPT-style Lar
 - **SwiGLU Activation**: Position-wise Feed-Forward Networks utilizing Swish Gated Linear Units (`Positionwise_FeedForward` with `SiLU`).
 - **Custom Initialization**: Truncated normal parameter initialization across projection and embedding weights.
 
-### Byte-Pair Encoding Tokenizer (`tokenizer/`)
+### Byte-Pair Encoding Tokenizer (`model/`)
 - **Custom BPE Algorithm**: Fast pair-frequency calculation and iterative merging with regex pre-tokenization (`PAT`).
 - **Special Token Support**: Full handling of custom control tokens such as `<|endoftext|>`.
 - **Numpy Array Serialization**: Fast encoding pipeline (`encode_dataset`) storing token IDs as compact `uint16` binary files (`.npy`).
@@ -112,7 +112,7 @@ Train a BPE tokenizer or encode raw text datasets into binary format:
 
 ```bash
 # Encode text corpus into binary .npy token arrays
-python -m tokenizer.tokenizer
+python -m model.tokenizer
 ```
 
 ### 3. Train the Model
